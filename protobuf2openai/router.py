@@ -5,6 +5,7 @@ import json
 import time
 import uuid
 from typing import Any, Dict, List, Optional
+import os
 
 import requests
 from fastapi import APIRouter, HTTPException
@@ -71,6 +72,28 @@ async def chat_completions(req: ChatCompletionsRequest):
 
     # 整理消息
     history: List[ChatMessage] = reorder_messages_for_anthropic(list(req.messages))
+
+    # 注入来自环境变量的全局 system prompt（如果设置了且历史中不存在相同的 system 消息）
+    try:
+        system_prompt_env = os.environ.get("SYSTEM_PROMPT") or os.environ.get("DEFAULT_SYSTEM_PROMPT")
+        if system_prompt_env:
+            # 检查历史中是否已有等价的 system 消息（文本相同）
+            exists = False
+            for m in history:
+                if m.role == "system":
+                    try:
+                        existing_text = segments_to_text(normalize_content_to_list(m.content))
+                    except Exception:
+                        existing_text = str(m.content or "")
+                    if existing_text.strip() and existing_text.strip() == system_prompt_env.strip():
+                        exists = True
+                        break
+            if not exists:
+                # 在最前端插入一条 system 消息
+                history.insert(0, ChatMessage(role="system", content=system_prompt_env))
+    except Exception:
+        # 如果注入逻辑失败，不应阻塞主流程，仅记录并继续
+        logger.exception("[OpenAI Compat] 注入 SYSTEM_PROMPT 失败")
 
     # 2) 打印整理后的请求体（post-reorder）
     try:

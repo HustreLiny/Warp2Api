@@ -427,7 +427,7 @@ def decode_server_message_data(b64url: str) -> Dict:
     return out
 
 
-def encode_server_message_data(uuid: str = None, seconds: int = None, nanos: int = None) -> str:
+def encode_server_message_data(uuid: str, seconds: int , nanos: int) -> str:
     """将 uuid/seconds/nanos 组合编码为 Base64URL 字符串。"""
     parts = bytearray()
     if uuid:
