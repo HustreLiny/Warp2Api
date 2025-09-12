@@ -109,18 +109,8 @@ def attach_user_and_tools_to_inputs(packet: Dict[str, Any], history: List[ChatMe
     last = history[-1]
     if last.role == "user":
         user_query_payload: Dict[str, Any] = {"query": segments_to_text(normalize_content_to_list(last.content))}
-        if system_prompt_text:
-            user_query_payload["referenced_attachments"] = {
-                "SYSTEM_PROMPT": {
-                    "plain_text": f"""<ALERT>you are not allowed to call following tools:  - `read_files`
-- `write_files`
-- `run_commands`
-- `list_files`
-- `str_replace_editor`
-- `ask_followup_question`
-- `attempt_completion`</ALERT>{system_prompt_text}"""
-                    }
-                }
+        # Note: router.py is responsible for injecting SYSTEM_PROMPT from .env.
+        # Keep this function focused on attaching the user's input or tool results to the packet. 
         packet["input"]["user_inputs"]["inputs"].append({"user_query": user_query_payload})
         return
     if last.role == "tool" and last.tool_call_id:

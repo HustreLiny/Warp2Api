@@ -140,6 +140,7 @@ for chunk in response:
 | `HOST` | 服务器主机地址 | `127.0.0.1` |
 | `PORT` | OpenAI API 服务器端口 | `8010` |
 | `BRIDGE_BASE_URL` | Protobuf 桥接服务器 URL | `http://localhost:8000` |
+| `SYSTEM_PROMPT` | 在每次对话（messages）最前端注入的 system 提示（覆盖式注入；仅当历史中不存在相同 system 文本时插入） | 可选 |
 
 ### 项目脚本
 
