@@ -6,10 +6,10 @@ Warp Protobuf编解码服务器启动文件
 纯protobuf编解码服务器，提供JSON<->Protobuf转换、WebSocket监控和静态文件服务。
 """
 
-import os
-import asyncio
-import json
+from typing import Dict, Optional, Tuple
+import base64
 from pathlib import Path
+from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI
@@ -17,8 +17,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from fastapi import Query, HTTPException
 from fastapi.responses import Response
+
 # 新增：类型导入
-from typing import Any, Dict, List
+from typing import Any
 
 from warp2protobuf.api.protobuf_routes import app as protobuf_app
 from warp2protobuf.core.logging import logger, set_log_file
@@ -30,6 +31,7 @@ from warp2protobuf.config.models import get_all_unique_models
 
 
 # ============= 工具：input_schema 清理与校验 =============
+
 
 def _is_empty_value(value: Any) -> bool:
     if value is None:
@@ -77,9 +79,17 @@ def _ensure_property_schema(name: str, schema: Dict[str, Any]) -> Dict[str, Any]
     prop = _deep_clean(prop)
 
     # 必填：type & description
-    if "type" not in prop or not isinstance(prop.get("type"), str) or not prop["type"].strip():
+    if (
+        "type" not in prop
+        or not isinstance(prop.get("type"), str)
+        or not prop["type"].strip()
+    ):
         prop["type"] = _infer_type_for_property(name)
-    if "description" not in prop or not isinstance(prop.get("description"), str) or not prop["description"].strip():
+    if (
+        "description" not in prop
+        or not isinstance(prop.get("description"), str)
+        or not prop["description"].strip()
+    ):
         prop["description"] = f"{name} parameter"
 
     # 特殊处理 headers：必须是对象，且其 properties 不能是空
@@ -101,22 +111,35 @@ def _ensure_property_schema(name: str, schema: Dict[str, Any]) -> Dict[str, Any]
             fixed_headers: Dict[str, Any] = {}
             for hk, hv in headers_props.items():
                 sub = _deep_clean(hv if isinstance(hv, dict) else {})
-                if "type" not in sub or not isinstance(sub.get("type"), str) or not sub["type"].strip():
+                if (
+                    "type" not in sub
+                    or not isinstance(sub.get("type"), str)
+                    or not sub["type"].strip()
+                ):
                     sub["type"] = "string"
-                if "description" not in sub or not isinstance(sub.get("description"), str) or not sub["description"].strip():
+                if (
+                    "description" not in sub
+                    or not isinstance(sub.get("description"), str)
+                    or not sub["description"].strip()
+                ):
                     sub["description"] = f"{hk} header"
                 fixed_headers[hk] = sub
             headers_props = fixed_headers
         prop["properties"] = headers_props
         # 处理 required 空数组
         if isinstance(prop.get("required"), list):
-            req = [r for r in prop["required"] if isinstance(r, str) and r in headers_props]
+            req = [
+                r for r in prop["required"] if isinstance(r, str) and r in headers_props
+            ]
             if req:
                 prop["required"] = req
             else:
                 prop.pop("required", None)
         # additionalProperties 若为空 dict，删除；保留显式 True/False
-        if isinstance(prop.get("additionalProperties"), dict) and len(prop["additionalProperties"]) == 0:
+        if (
+            isinstance(prop.get("additionalProperties"), dict)
+            and len(prop["additionalProperties"]) == 0
+        ):
             prop.pop("additionalProperties", None)
 
     return prop
@@ -139,7 +162,9 @@ def _sanitize_json_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(properties, dict):
         fixed_props: Dict[str, Any] = {}
         for name, subschema in properties.items():
-            fixed_props[name] = _ensure_property_schema(name, subschema if isinstance(subschema, dict) else {})
+            fixed_props[name] = _ensure_property_schema(
+                name, subschema if isinstance(subschema, dict) else {}
+            )
         s["properties"] = fixed_props
 
     # required：去掉不存在的属性，且不允许为空列表
@@ -154,7 +179,10 @@ def _sanitize_json_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
             s.pop("required", None)
 
     # additionalProperties：空 dict 视为无效，删除
-    if isinstance(s.get("additionalProperties"), dict) and len(s["additionalProperties"]) == 0:
+    if (
+        isinstance(s.get("additionalProperties"), dict)
+        and len(s["additionalProperties"]) == 0
+    ):
         s.pop("additionalProperties", None)
 
     return s
@@ -166,49 +194,65 @@ class _InputSchemaSanitizerMiddleware:  # deprecated; use sanitize_mcp_input_sch
 
 # ============= 应用创建 =============
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理"""
+    # 启动时执行
+    await startup_tasks()
+    yield
+    # 关闭时执行（如果需要的话）
+    pass
+
+
 def create_app() -> FastAPI:
     """创建FastAPI应用"""
     # 将服务器日志重定向到专用文件
     try:
-        set_log_file('warp_server.log')
+        set_log_file("warp_server.log")
     except Exception:
         pass
-    
-    # 使用protobuf路由的应用作为主应用
-    app = protobuf_app
+
+    # 使用protobuf路由的应用作为主应用，并添加lifespan处理器
+    app = FastAPI(lifespan=lifespan)
+
+    # 将protobuf路由包含到主应用中
+    app.mount("/", protobuf_app)
 
     # 挂载输入 schema 清理中间件（覆盖 Warp 相关端点）
 
-    
     # 检查静态文件目录
     static_dir = Path("static")
     if static_dir.exists():
         # 挂载静态文件服务
         app.mount("/static", StaticFiles(directory="static"), name="static")
         logger.info("✅ 静态文件服务已启用: /static")
-        
+
         # 添加根路径重定向到前端界面
         @app.get("/gui", response_class=HTMLResponse)
         async def serve_gui():
             """提供前端GUI界面"""
             index_file = static_dir / "index.html"
             if index_file.exists():
-                return HTMLResponse(content=index_file.read_text(encoding='utf-8'))
+                return HTMLResponse(content=index_file.read_text(encoding="utf-8"))
             else:
-                return HTMLResponse(content="""
+                return HTMLResponse(
+                    content="""
                 <html>
                     <body>
                         <h1>前端界面文件未找到</h1>
                         <p>请确保 static/index.html 文件存在</p>
                     </body>
                 </html>
-                """)
+                """
+                )
     else:
         logger.warning("静态文件目录不存在，GUI界面将不可用")
-        
+
         @app.get("/gui", response_class=HTMLResponse)
         async def no_gui():
-            return HTMLResponse(content="""
+            return HTMLResponse(
+                content="""
             <html>
                 <body>
                     <h1>GUI界面未安装</h1>
@@ -216,13 +260,18 @@ def create_app() -> FastAPI:
                     <p>请创建前端界面文件</p>
                 </body>
             </html>
-            """)
+            """
+            )
 
     # ============= 新增接口：返回protobuf编码后的AI请求字节 =============
     @app.post("/api/warp/encode_raw")
     async def encode_ai_request_raw(
         request: EncodeRequest,
-        output: str = Query("raw", description="输出格式：raw(默认，返回application/x-protobuf字节) 或 base64", regex=r"^(raw|base64)$"),
+        output: str = Query(
+            "raw",
+            description="输出格式：raw(默认，返回application/x-protobuf字节) 或 base64",
+            regex=r"^(raw|base64)$",
+        ),
     ):
         try:
             # 获取实际数据并验证
@@ -253,6 +302,7 @@ def create_app() -> FastAPI:
             else:
                 # 返回base64文本，便于在JSON中传输/调试
                 import base64
+
                 return {
                     "protobuf_base64": base64.b64encode(protobuf_bytes).decode("utf-8"),
                     "size": len(protobuf_bytes),
@@ -263,7 +313,7 @@ def create_app() -> FastAPI:
         except Exception as e:
             logger.error(f"❌ AI请求编码失败: {e}")
             raise HTTPException(500, f"编码失败: {str(e)}")
-    
+
     # ============= OpenAI 兼容：模型列表接口 =============
     @app.get("/v1/models")
     async def list_models():
@@ -274,7 +324,7 @@ def create_app() -> FastAPI:
         except Exception as e:
             logger.error(f"❌ 获取模型列表失败: {e}")
             raise HTTPException(500, f"获取模型列表失败: {str(e)}")
-    
+
     return app
 
 
@@ -288,9 +338,6 @@ def create_app() -> FastAPI:
 #   - 字段 3：google.protobuf.Timestamp（字段1=seconds，字段2=nanos）
 # 可能出现：仅 Timestamp、仅 UUID、或 UUID + Timestamp。
 
-from typing import Dict, Optional, Tuple
-import base64
-from datetime import datetime, timezone
 try:
     from zoneinfo import ZoneInfo  # Python 3.9+
 except Exception:
@@ -399,7 +446,7 @@ def decode_server_message_data(b64url: str) -> Dict:
         if wt == 2:  # length-delimited
             ln, i2 = _read_varint(raw, i)
             i = i2
-            data = raw[i:i+ln]
+            data = raw[i : i + ln]
             i += ln
             if field_no == 1:  # uuid string
                 try:
@@ -427,7 +474,11 @@ def decode_server_message_data(b64url: str) -> Dict:
     return out
 
 
-def encode_server_message_data(uuid: str, seconds: int , nanos: int) -> str:
+def encode_server_message_data(
+    uuid: Optional[str] = None,
+    seconds: Optional[int] = None,
+    nanos: Optional[int] = None,
+) -> str:
     """将 uuid/seconds/nanos 组合编码为 Base64URL 字符串。"""
     parts = bytearray()
     if uuid:
@@ -447,22 +498,24 @@ def encode_server_message_data(uuid: str, seconds: int , nanos: int) -> str:
 
 async def startup_tasks():
     """启动时执行的任务"""
-    logger.info("="*60)
+    logger.info("=" * 60)
     logger.info("Warp Protobuf编解码服务器启动")
-    logger.info("="*60)
-    
+    logger.info("=" * 60)
+
     # 检查protobuf运行时
     try:
         from warp2protobuf.core.protobuf import ensure_proto_runtime
+
         ensure_proto_runtime()
         logger.info("✅ Protobuf运行时初始化成功")
     except Exception as e:
         logger.error(f"❌ Protobuf运行时初始化失败: {e}")
         raise
-    
+
     # 检查JWT token
     try:
         from warp2protobuf.core.auth import get_jwt_token, is_token_expired
+
         token = get_jwt_token()
         if token and not is_token_expired(token):
             logger.info("✅ JWT token有效")
@@ -480,11 +533,11 @@ async def startup_tasks():
             logger.warning("⚠️ JWT token无效或已过期，建议运行: uv run refresh_jwt.py")
     except Exception as e:
         logger.warning(f"⚠️ JWT检查失败: {e}")
-    
+
     # 如需 OpenAI 兼容层，请单独运行 src/openai_compat_server.py
-    
+
     # 显示可用端点
-    logger.info("-"*40)
+    logger.info("-" * 40)
     logger.info("可用的API端点:")
     logger.info("  GET  /                   - 服务信息")
     logger.info("  GET  /healthz            - 健康检查")
@@ -493,8 +546,12 @@ async def startup_tasks():
     logger.info("  POST /api/decode         - Protobuf -> JSON解码")
     logger.info("  POST /api/stream-decode  - 流式protobuf解码")
     logger.info("  POST /api/warp/send      - JSON -> Protobuf -> Warp API转发")
-    logger.info("  POST /api/warp/send_stream - JSON -> Protobuf -> Warp API转发(返回解析事件)")
-    logger.info("  POST /api/warp/send_stream_sse - JSON -> Protobuf -> Warp API转发(实时SSE，事件已解析)")
+    logger.info(
+        "  POST /api/warp/send_stream - JSON -> Protobuf -> Warp API转发(返回解析事件)"
+    )
+    logger.info(
+        "  POST /api/warp/send_stream_sse - JSON -> Protobuf -> Warp API转发(实时SSE，事件已解析)"
+    )
     logger.info("  POST /api/warp/graphql/* - GraphQL请求转发到Warp API（带鉴权）")
     logger.info("  GET  /api/schemas        - Protobuf schema信息")
     logger.info("  GET  /api/auth/status    - JWT认证状态")
@@ -502,32 +559,21 @@ async def startup_tasks():
     logger.info("  GET  /api/auth/user_id   - 获取当前用户ID")
     logger.info("  GET  /api/packets/history - 数据包历史记录")
     logger.info("  WS   /ws                 - WebSocket实时监控")
-    logger.info("-"*40)
+    logger.info("-" * 40)
     logger.info("测试命令:")
     logger.info("  uv run main.py --test basic    - 运行基础测试")
     logger.info("  uv run main.py --list          - 查看所有测试场景")
-    logger.info("="*60)
+    logger.info("=" * 60)
 
 
 def main():
     """主函数"""
     # 创建应用
     app = create_app()
-    
-    # 添加启动事件
-    @app.on_event("startup")
-    async def startup_event():
-        await startup_tasks()
-    
+
     # 启动服务器
     try:
-        uvicorn.run(
-            app,
-            host="0.0.0.0",
-            port=8000,
-            log_level="info",
-            access_log=True
-        )
+        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info", access_log=True)
     except KeyboardInterrupt:
         logger.info("服务器被用户停止")
     except Exception as e:
